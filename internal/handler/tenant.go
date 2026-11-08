@@ -1768,10 +1768,33 @@ func (h *TenantHandler) updateTenantRetrievalConfigInternal(c *gin.Context) {
 		return
 	}
 
+	// The cross_language_bridge and test_file_penalty blocks are managed via
+	// this API but are not rendered by the settings UI, whose form submits
+	// only the fields it knows. An absent block therefore means "leave it
+	// as configured", not "delete it"; sending the block with enabled=false
+	// is the explicit way to turn a feature off.
 	tenant, _ := types.TenantInfoFromContext(ctx)
 	if tenant == nil {
 		logger.Error(ctx, "Workspace is empty")
 		c.Error(errors.NewBadRequestError("Workspace is empty"))
+		return
+	}
+	if cfg.CrossLanguageBridge == nil && tenant.RetrievalConfig != nil {
+		cfg.CrossLanguageBridge = tenant.RetrievalConfig.CrossLanguageBridge
+	}
+	if cfg.TestFilePenalty == nil && tenant.RetrievalConfig != nil {
+		cfg.TestFilePenalty = tenant.RetrievalConfig.TestFilePenalty
+	}
+	if cb := cfg.CrossLanguageBridge; cb != nil && cb.Enabled &&
+		cb.Mode != "" && cb.Mode != types.DefaultCrossLanguageBridgeMode && cb.Mode != "concat" {
+		c.Error(errors.NewBadRequestError(
+			"cross_language_bridge.mode must be \"replace\" or \"concat\""))
+		return
+	}
+	if tp := cfg.TestFilePenalty; tp != nil && tp.Enabled &&
+		(tp.Penalty <= 0 || tp.Penalty > 1) {
+		c.Error(errors.NewBadRequestError(
+			"test_file_penalty.penalty must be greater than 0 and at most 1"))
 		return
 	}
 
