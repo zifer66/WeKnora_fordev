@@ -154,6 +154,32 @@ curl -X PUT "$BASE/api/v1/tenants/kv/default-settings" \
 
 PUT 成功返回 `{"success":true,"data":{...保存后的六项配置...},"message":"Default settings updated successfully"}`。实现：`internal/handler/tenant_default_settings.go`、`internal/types/default_settings.go`。
 
+### 检索增强开关：retrieval-config 的跨语言桥接与测试文件降权 {#retrieval-port}
+
+`retrieval-config` 除界面上已有的检索参数外，还有两个通过 API 管理的增强块（设置界面不渲染它们）。二者均默认关闭、按 `kb_ids` 限定生效的知识库，来源于代码知识库检索实测（跨语言 20 题黄金集：KB 检索 top1 从 0/20 提升到 12/20）：
+
+| 块 | 字段 | 说明 |
+| --- | --- | --- |
+| `cross_language_bridge` | `enabled` | 开启后，中文/日文主导的提问在检索前先翻译成英文（用空间默认对话模型，可用 `model_id` 指定） |
+| | `kb_ids` | 生效的知识库列表；为空表示全部（仅当整个空间的语料都是拉丁字母时才应留空） |
+| | `mode` | `replace`（默认，仅检索译文）或 `concat`（原文 + 译文） |
+| `test_file_penalty` | `enabled` | 开启后，测试文件命中的融合分乘以 `penalty`（默认 0.5），把词法高度相似但通常不是答案的测试代码降到实现代码之后 |
+| | `kb_ids` | 同上，限定生效的知识库 |
+| | `penalty` | 降权系数，取值 (0, 1]，推荐 0.5 |
+
+`cross_language_bridge` 只应对**英文（拉丁字母）语料**的知识库开启：中文/日文语料的库开了反而会把提问从与其内容一致的语言移走。提问本身提到测试（test、测试、試験、conftest、fixture、pytest、unittest、spec）时，测试文件降权自动跳过，因为这类问题的正确答案就是测试文件。
+
+这两个块在 PUT 中**缺省表示保持原值**（设置界面提交的表单不含它们，缺省保留可避免界面保存时误删）；显式传 `{"enabled": false}` 即关闭。其余字段语义不变。
+
+```bash
+# 为代码知识库开启桥接 + 测试降权（其余字段需一并提交）
+curl -X PUT "$BASE/api/v1/tenants/kv/retrieval-config" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"embedding_top_k":50,"vector_threshold":0.15,"keyword_threshold":0.3,"rerank_top_k":10,"rerank_threshold":0.2,"rerank_model_id":"","cross_language_bridge":{"enabled":true,"kb_ids":["<代码库ID>"],"mode":"replace"},"test_file_penalty":{"enabled":true,"kb_ids":["<代码库ID>"],"penalty":0.5}}'
+```
+
+实现：`internal/application/service/knowledgebase_search_bridge.go`、`internal/application/service/knowledgebase_search_testfile.go`、`internal/types/retrieval_config.go`。
+
 ## API Key 与 API 主体
 
 ### GET /api/v1/tenants/:id/api-keys

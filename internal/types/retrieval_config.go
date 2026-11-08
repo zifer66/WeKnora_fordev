@@ -35,6 +35,69 @@ type RetrievalConfig struct {
 	RRFVectorWeight float64 `json:"rrf_vector_weight,omitempty"`
 	// RRFKeywordWeight is the keyword counterpart. Default: 0.3.
 	RRFKeywordWeight float64 `json:"rrf_keyword_weight,omitempty"`
+
+	// CrossLanguageBridge translates a CJK-dominant query into English before
+	// retrieval. It exists for knowledge bases whose corpus is Latin-script
+	// (source code, English documents): such a question has no lexical bridge
+	// into the corpus and both retrieval legs miss. Measured on a 20-question
+	// Chinese/Japanese to English Java-repo golden set, retrieval top-1 rose
+	// from 0/20 to 4/20 with the bridge alone, and to 12/20 stacked with
+	// test-file down-weighting and chunk rerank, at zero agent cost.
+	// A corpus written in Chinese/Japanese must keep it disabled: translation
+	// would move its queries away from the language of its own chunks.
+	// Disabled by default; managed via the retrieval-config KV API.
+	CrossLanguageBridge *CrossLanguageBridgeConfig `json:"cross_language_bridge,omitempty"`
+	// TestFilePenalty downscores chunks whose document title identifies a test
+	// file, unless the query itself asks about tests. On code QA the lexically
+	// similar test chunk regularly outranks the implementation the question
+	// asks for (7 of 16 retrieval misses on the cross-lingual golden set had a
+	// test file at top-1 with the gold one to five ranks below). Halving the
+	// fused score recovered 2 top-1 and 4 top-5 hits without hurting sets
+	// whose gold answers legitimately include test files, thanks to the
+	// query gate. Disabled by default; managed via the retrieval-config KV API.
+	TestFilePenalty *TestFilePenaltyConfig `json:"test_file_penalty,omitempty"`
+}
+
+// DefaultCrossLanguageBridgeMode searches only the translation.
+const DefaultCrossLanguageBridgeMode = "replace"
+
+// DefaultTestFilePenalty is the multiplier the research grid search picked:
+// small enough to demote lexically similar test chunks below the
+// implementation, large enough that a strong match can still surface.
+const DefaultTestFilePenalty = 0.5
+
+// CrossLanguageBridgeConfig scopes and parameterizes CJK to English query
+// translation. Every field defaults to "off" or "workspace default", so an
+// absent or zero-value block never changes retrieval behavior.
+type CrossLanguageBridgeConfig struct {
+	// Enabled turns the bridge on. Default false.
+	Enabled bool `json:"enabled"`
+	// KBIDs scopes the bridge to these knowledge bases; a search whose KBs
+	// are all outside the list is untouched. Empty means every KB of the
+	// workspace, which is only sensible when the whole workspace indexes
+	// Latin-script corpora.
+	KBIDs []string `json:"kb_ids,omitempty"`
+	// Mode selects what is searched: "replace" (default) searches the
+	// translation only, "concat" searches the original query joined with the
+	// translation. Concat keeps original-language keywords in play at the
+	// cost of noisier matches; the golden set preferred replace.
+	Mode string `json:"mode,omitempty"`
+	// ModelID is the chat model used for translation. Empty picks the
+	// workspace default chat model.
+	ModelID string `json:"model_id,omitempty"`
+}
+
+// TestFilePenaltyConfig scopes the test-file down-weighting.
+type TestFilePenaltyConfig struct {
+	// Enabled turns the down-weighting on. Default false.
+	Enabled bool `json:"enabled"`
+	// KBIDs scopes the penalty to chunks of these knowledge bases. Empty
+	// means every KB of the workspace, which is only sensible when the
+	// workspace only hosts code corpora.
+	KBIDs []string `json:"kb_ids,omitempty"`
+	// Penalty multiplies the fused score of test-file chunks. Valid range
+	// (0, 1]; 1 would be a no-op. Default 0.5.
+	Penalty float64 `json:"penalty"`
 }
 
 // DefaultRetrievalTopK is the retrieval depth used when a caller supplies no
@@ -112,6 +175,38 @@ func (c *RetrievalConfig) GetEffectiveRRFWeights() (vector, keyword float64) {
 		k = 0.3
 	}
 	return v, k
+}
+
+// GetEffectiveCrossLanguageBridge returns the bridge config with defaults
+// normalized, or nil when the bridge is off (config absent, disabled). The
+// returned copy is safe to mutate: it never aliases the stored config.
+func (c *RetrievalConfig) GetEffectiveCrossLanguageBridge() *CrossLanguageBridgeConfig {
+	if c == nil || c.CrossLanguageBridge == nil || !c.CrossLanguageBridge.Enabled {
+		return nil
+	}
+	out := *c.CrossLanguageBridge
+	if out.Mode != "concat" {
+		// replace is the default; an unknown mode falls back to it rather
+		// than silently skipping the bridge.
+		out.Mode = DefaultCrossLanguageBridgeMode
+	}
+	return &out
+}
+
+// GetEffectiveTestFilePenalty returns the test-file penalty config, or nil
+// when the feature is off (config absent or disabled). A penalty outside
+// (0, 1] — only possible for rows written without the handler validation —
+// falls back to the default multiplier instead of trusting a bad value.
+// The returned copy never aliases the stored config.
+func (c *RetrievalConfig) GetEffectiveTestFilePenalty() *TestFilePenaltyConfig {
+	if c == nil || c.TestFilePenalty == nil || !c.TestFilePenalty.Enabled {
+		return nil
+	}
+	out := *c.TestFilePenalty
+	if out.Penalty <= 0 || out.Penalty > 1 {
+		out.Penalty = DefaultTestFilePenalty
+	}
+	return &out
 }
 
 // Value implements the driver.Valuer interface for database serialization

@@ -226,6 +226,10 @@ func (s *knowledgeBaseService) hybridSearchCandidates(ctx context.Context,
 		searchKBIDs, secutils.SanitizeForLog(params.QueryText))
 
 	tenantInfo, _ := types.TenantInfoFromContext(ctx)
+	var retrievalCfg *types.RetrievalConfig
+	if tenantInfo != nil {
+		retrievalCfg = tenantInfo.RetrievalConfig
+	}
 
 	// Batch-load every KB in scope. Required for store grouping,
 	// embedding-model consistency validation, and FAQ type detection.
@@ -268,6 +272,14 @@ func (s *knowledgeBaseService) hybridSearchCandidates(ctx context.Context,
 	kb := pickPrimary(kbs, id)
 	if kb == nil {
 		return nil, apperrors.NewNotFoundError("knowledge base not found")
+	}
+
+	// Cross-language bridge: translate a CJK-dominant query into English
+	// before any leg of the retrieval sees it. Runs before the query
+	// embedding is computed (or re-computed) so both legs search the same
+	// language. No-op unless the tenant enabled it for a KB in this search.
+	if bridgeCfg := retrievalCfg.GetEffectiveCrossLanguageBridge(); bridgeCfg != nil {
+		s.applyCrossLanguageBridge(ctx, kbs, &params, bridgeCfg)
 	}
 
 	// Over-retrieval (existing rule, preserved): 5x per-KB matchCount,
@@ -366,11 +378,15 @@ func (s *knowledgeBaseService) hybridSearchCandidates(ctx context.Context,
 	logger.Infof(ctx, "Result count before fusion: vector=%d, keyword=%d",
 		len(vectorResults), len(keywordResults))
 
-	var retrievalCfg *types.RetrievalConfig
-	if tenantInfo != nil {
-		retrievalCfg = tenantInfo.RetrievalConfig
-	}
 	deduplicatedChunks := fuseOrDeduplicate(ctx, vectorLists, keywordLists, retrievalCfg)
+
+	// Test-file down-weighting for code corpora: demote chunks of test files
+	// below the implementation they lexically mirror, before the MatchCount
+	// cut and the rerank pool are taken from this order. No-op unless the
+	// tenant enabled it, and skipped for queries that ask about tests.
+	if penaltyCfg := retrievalCfg.GetEffectiveTestFilePenalty(); penaltyCfg != nil {
+		deduplicatedChunks = s.downweightTestFiles(ctx, params.QueryText, deduplicatedChunks, penaltyCfg)
+	}
 
 	kb.EnsureDefaults()
 
